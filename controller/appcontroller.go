@@ -1468,7 +1468,7 @@ func (ctrl *ApplicationController) processRequestedAppOperation(app *appv1.Appli
 	case synccommon.OperationFailed, synccommon.OperationError:
 		now := metav1.Now()
 		switch {
-		case !terminating && state.Operation.Retry.Refresh && hasNewRevisionsToResync(app):
+		case !terminating && hasNewRevisionsToResync(app):
 			// Stop retrying in case of failure and new revisions - will be tried in new sync attempt
 			state.Message = state.Message + " (retry terminated - new revisions)"
 			logCtx.Debug("Terminating sync retry, there are new revisions")

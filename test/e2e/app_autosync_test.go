@@ -111,8 +111,7 @@ func TestAutoSyncSelfHealRetryAndRefreshEnabled(t *testing.T) {
 						SelfHeal: true,
 					},
 					Retry: &RetryStrategy{
-						Limit:   limit,
-						Refresh: true,
+						Limit: limit,
 					},
 				}
 			}).
