@@ -424,3 +424,61 @@ func TestOCISourceIgnoredWithSourceIntegrity(t *testing.T) {
 		DoNotIgnoreErrors().
 		Sync("--local-repo-root", ".", "--force", "--prune")
 }
+
+func TestSourceIntegrityRepoClash(t *testing.T) {
+	// Use different projects/policies for the same repo/app-ame and verify both are handled according to their respective policy
+	gpgBadKeyID := "BADC4FCA57A46444"
+
+	workingApp := Given(t).
+		Project("gpg").
+		ProjectSpec(appProjectWithSourceIntegrity(fixture.GpgGoodKeyID)).
+		Path(guestbookPath).
+		GPGPublicKeyAdded()
+
+	brokenApp := GivenWithSameState(workingApp).
+		SetAppNamespace(fixture.ArgoCDAppNamespace).
+		Project("default").
+		ProjectSpec(appProjectWithSourceIntegrity(gpgBadKeyID)).
+		Path("deployment").
+		GPGPublicKeyAdded()
+
+	workingApp.When().
+		AddSignedFile("fake.yaml", "").
+		IgnoreErrors().
+		CreateApp().
+		Sync().
+		Then().
+		Expect(OperationPhaseIs(OperationSucceeded)).
+		Expect(SyncStatusIs(SyncStatusCodeSynced)).
+		Expect(HealthIs(health.HealthStatusHealthy)).
+		Expect(NoConditions())
+
+	brokenApp.When().
+		IgnoreErrors().
+		CreateApp().
+		Sync().
+		Then().
+		Expect(OperationPhaseIs(OperationError)).
+		Expect(SyncStatusIs(SyncStatusCodeOutOfSync)).
+		Expect(HealthIs(health.HealthStatusMissing)).
+		Expect(Condition(ApplicationConditionComparisonError, "GIT/GPG: Failed verifying revision ")).
+		Expect(Condition(ApplicationConditionComparisonError, "signed with unallowed key (key_id="+fixture.GpgGoodKeyID+")"))
+
+	// Rerun to make sure the state is independent on repeated sync as well
+	workingApp.When().
+		Sync().
+		Then().
+		Expect(OperationPhaseIs(OperationSucceeded)).
+		Expect(SyncStatusIs(SyncStatusCodeSynced)).
+		Expect(HealthIs(health.HealthStatusHealthy)).
+		Expect(NoConditions())
+	brokenApp.When().
+		IgnoreErrors().
+		Sync().
+		Then().
+		Expect(OperationPhaseIs(OperationError)).
+		Expect(SyncStatusIs(SyncStatusCodeOutOfSync)).
+		Expect(HealthIs(health.HealthStatusMissing)).
+		Expect(Condition(ApplicationConditionComparisonError, "GIT/GPG: Failed verifying revision ")).
+		Expect(Condition(ApplicationConditionComparisonError, "signed with unallowed key (key_id="+fixture.GpgGoodKeyID+")"))
+}

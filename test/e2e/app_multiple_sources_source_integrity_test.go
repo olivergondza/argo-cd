@@ -23,8 +23,9 @@ func appProjectWithSourceIntegrity(keys ...string) AppProjectSpec {
 		keys = []string{}
 	}
 	return AppProjectSpec{
-		SourceRepos:  []string{"*"},
-		Destinations: []ApplicationDestination{{Namespace: "*", Server: "*"}},
+		SourceRepos:      []string{"*"},
+		SourceNamespaces: []string{"*"},
+		Destinations:     []ApplicationDestination{{Namespace: "*", Server: "*"}},
 		SourceIntegrity: &SourceIntegrity{
 			Git: &SourceIntegrityGit{
 				Policies: []*SourceIntegrityGitPolicy{{
