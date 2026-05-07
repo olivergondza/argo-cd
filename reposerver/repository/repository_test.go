@@ -21,6 +21,7 @@ import (
 	"testing"
 	"time"
 
+	imagev1 "github.com/opencontainers/image-spec/specs-go/v1"
 	log "github.com/sirupsen/logrus"
 	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/util/intstr"
@@ -69,7 +70,7 @@ var sourceIntegrityReqStrict = &v1alpha1.SourceIntegrity{
 	},
 }
 
-var LsSignaturesMockOk = func(_ string, _ bool) (info []git.RevisionSignatureInfo, err error) {
+var LsSignaturesMockOk = func(_ string, _ bool) (info []git.RevisionSignatureInfo, legacy string, err error) {
 	return []git.RevisionSignatureInfo{
 		{
 			Revision:           "d71589b8001a0bd78bb311cb03c9d129c6f91de1",
@@ -78,10 +79,10 @@ var LsSignaturesMockOk = func(_ string, _ bool) (info []git.RevisionSignatureInf
 			Date:               "Fri Oct 31 14:42:39 2025 +0100",
 			AuthorIdentity:     "Jane Doe <jdoe@acme.com>",
 		},
-	}, nil
+	}, "", nil
 }
 
-var LsSignaturesMockGitError = func(_ string, _ bool) (info []git.RevisionSignatureInfo, err error) {
+var LsSignaturesMockGitError = func(_ string, _ bool) (info []git.RevisionSignatureInfo, legacy string, err error) {
 	return []git.RevisionSignatureInfo{{
 		Revision:           "171589b8001a0bd78bb311cb03c9d129c6f91de1",
 		VerificationResult: git.GPGVerificationResultExpiredKey,
@@ -94,7 +95,7 @@ var LsSignaturesMockGitError = func(_ string, _ bool) (info []git.RevisionSignat
 		SignatureKeyID:     "",
 		Date:               "Fri Oct 31 14:42:39 2025 +0100",
 		AuthorIdentity:     "Unsigned <unsigned@acme.com>",
-	}}, nil
+	}}, "", nil
 }
 
 var sourceIntegrityResultGitError = &v1alpha1.SourceIntegrityCheckResult{Checks: []v1alpha1.SourceIntegrityCheckResultItem{{
@@ -400,7 +401,7 @@ func TestGenerateManifests_K8SAPIResetCache(t *testing.T) {
 
 	cachedFakeResponse := &apiclient.ManifestResponse{Manifests: []string{"Fake"}, Revision: mock.Anything}
 
-	err := service.cache.SetManifests(mock.Anything, &src, q.RefSources, &q, "", "", "", "", &cache.CachedManifestResponse{ManifestResponse: cachedFakeResponse}, nil, "")
+	err := service.cache.SetManifests(mock.Anything, &src, q.RefSources, &q, "", "", "", "", &cache.CachedManifestResponse{ManifestResponse: cachedFakeResponse}, nil, "", nil)
 	require.NoError(t, err)
 
 	res, err := service.GenerateManifest(t.Context(), &q)
@@ -425,7 +426,7 @@ func TestGenerateManifests_EmptyCache(t *testing.T) {
 		ProjectSourceRepos: []string{"*"},
 	}
 
-	err := service.cache.SetManifests(mock.Anything, &src, q.RefSources, &q, "", "", "", "", &cache.CachedManifestResponse{ManifestResponse: nil}, nil, "")
+	err := service.cache.SetManifests(mock.Anything, &src, q.RefSources, &q, "", "", "", "", &cache.CachedManifestResponse{ManifestResponse: nil}, nil, "", nil)
 	require.NoError(t, err)
 
 	res, err := service.GenerateManifest(t.Context(), &q)
@@ -864,7 +865,7 @@ func TestManifestGenErrorCacheByNumRequests(t *testing.T) {
 		assert.NotNil(t, manifestRequest)
 
 		cachedManifestResponse := &cache.CachedManifestResponse{}
-		err := service.cache.GetManifests(mock.Anything, manifestRequest.ApplicationSource, manifestRequest.RefSources, manifestRequest, manifestRequest.Namespace, "", manifestRequest.AppLabelKey, manifestRequest.AppName, cachedManifestResponse, nil, "")
+		err := service.cache.GetManifests(mock.Anything, manifestRequest.ApplicationSource, manifestRequest.RefSources, manifestRequest, manifestRequest.Namespace, "", manifestRequest.AppLabelKey, manifestRequest.AppName, cachedManifestResponse, nil, "", nil)
 		require.NoError(t, err)
 		return cachedManifestResponse
 	}
@@ -1838,6 +1839,7 @@ func TestGetRevisionMetadata(t *testing.T) {
 		Repo:            &v1alpha1.Repository{},
 		Revision:        "c0b400fc458875d925171398f9ba9eabd5529923",
 		SourceIntegrity: sourceIntegrityReqStrict,
+		CheckSignature:  true, // nolint:staticcheck
 	})
 
 	require.NoError(t, err)
@@ -1855,6 +1857,7 @@ func TestGetRevisionMetadata(t *testing.T) {
 		Repo:            &v1alpha1.Repository{},
 		Revision:        "c0b400f",
 		SourceIntegrity: sourceIntegrityReqStrict,
+		CheckSignature:  true, // nolint:staticcheck
 	})
 
 	require.NoError(t, err)
@@ -1869,27 +1872,33 @@ func TestGetRevisionMetadata(t *testing.T) {
 		Repo:            &v1alpha1.Repository{},
 		Revision:        "c0b400fc458875d925171398f9ba9eabd5529923",
 		SourceIntegrity: nil,
+		CheckSignature:  false, // nolint:staticcheck
 	})
 	require.NoError(t, err)
 	assert.Nil(t, res.SourceIntegrityResult)
 
-	// Enforce cache miss - signature info should not be in result
+	// Cache miss - signature info should not be in result
 	res, err = service.GetRevisionMetadata(t.Context(), &apiclient.RepoServerRevisionMetadataRequest{
 		Repo:            &v1alpha1.Repository{},
 		Revision:        "da52afd3b2df1ec49470603d8bbb46954dab1091",
 		SourceIntegrity: nil,
+		CheckSignature:  false, // nolint:staticcheck
 	})
 	require.NoError(t, err)
 	assert.Nil(t, res.SourceIntegrityResult)
+	assert.Empty(t, res.SignatureInfo) // nolint:staticcheck
 
 	// Cache miss on the previous entry that did not have signature info - recreated
 	res, err = service.GetRevisionMetadata(t.Context(), &apiclient.RepoServerRevisionMetadataRequest{
 		Repo:            &v1alpha1.Repository{},
 		Revision:        "da52afd3b2df1ec49470603d8bbb46954dab1091",
 		SourceIntegrity: sourceIntegrityReqStrict,
+		CheckSignature:  true, // nolint:staticcheck
 	})
 	require.NoError(t, err)
+	require.NotNil(t, res.SourceIntegrityResult)
 	assert.True(t, res.SourceIntegrityResult.IsValid())
+	assert.NotEmpty(t, res.SignatureInfo) // nolint:staticcheck
 }
 
 func TestGetSignatureVerificationResult(t *testing.T) {
@@ -1903,6 +1912,7 @@ func TestGetSignatureVerificationResult(t *testing.T) {
 			Repo:               &v1alpha1.Repository{},
 			ApplicationSource:  &src,
 			SourceIntegrity:    sourceIntegrityReqStrict,
+			VerifySignature:    true, // nolint:staticcheck
 			ProjectName:        "something",
 			ProjectSourceRepos: []string{"*"},
 		}
@@ -1922,6 +1932,7 @@ func TestGetSignatureVerificationResult(t *testing.T) {
 			Repo:               &v1alpha1.Repository{},
 			ApplicationSource:  &src,
 			SourceIntegrity:    nil,
+			VerifySignature:    false, // nolint:staticcheck
 			ProjectName:        "something",
 			ProjectSourceRepos: []string{"*"},
 		}
@@ -1941,6 +1952,7 @@ func TestGetSignatureVerificationResult(t *testing.T) {
 			Repo:               &v1alpha1.Repository{},
 			ApplicationSource:  &src,
 			SourceIntegrity:    sourceIntegrityReqStrict,
+			VerifySignature:    true, // nolint:staticcheck
 			ProjectName:        "something",
 			ProjectSourceRepos: []string{"*"},
 		}
@@ -1959,6 +1971,7 @@ func TestGetSignatureVerificationResult(t *testing.T) {
 			Repo:               &v1alpha1.Repository{},
 			ApplicationSource:  &src,
 			SourceIntegrity:    nil,
+			VerifySignature:    false, // nolint:staticcheck
 			ProjectName:        "something",
 			ProjectSourceRepos: []string{"*"},
 		}
@@ -2288,7 +2301,7 @@ func TestGenerateManifestsWithAppParameterFile(t *testing.T) {
 			// Try to pull from the cache with a `source` that does not include any overrides. Overrides should not be
 			// part of the cache key, because you can't get the overrides without a repo operation. And avoiding repo
 			// operations is the point of the cache.
-			err = service.cache.GetManifests(mock.Anything, source, v1alpha1.RefTargetRevisionMapping{}, &v1alpha1.ClusterInfo{}, "", "", "", "test", res, nil, "")
+			err = service.cache.GetManifests(mock.Anything, source, v1alpha1.RefTargetRevisionMapping{}, &v1alpha1.ClusterInfo{}, "", "", "", "test", res, nil, "", nil)
 			require.NoError(t, err)
 		})
 	})
@@ -4552,7 +4565,7 @@ func TestErrorGetGitDirectories(t *testing.T) {
 			s, _, _ := newServiceWithOpt(t, func(gitClient *gitmocks.Client, _ *helmmocks.Client, _ *ocimocks.Client, paths *iomocks.TempPaths) {
 				gitClient.EXPECT().Checkout(mock.Anything, mock.Anything, mock.Anything).Return("", nil)
 				gitClient.EXPECT().LsRemote(mock.Anything).Return("", errors.New("ah error"))
-				gitClient.EXPECT().LsSignatures(mock.Anything, mock.Anything).Return([]git.RevisionSignatureInfo{}, errors.New("the thing have exploded"))
+				gitClient.EXPECT().LsSignatures(mock.Anything, mock.Anything).Return([]git.RevisionSignatureInfo{}, "", errors.New("the thing have exploded"))
 				gitClient.EXPECT().Root().Return(root)
 				paths.EXPECT().GetPath(mock.Anything).Return(".", nil)
 				paths.EXPECT().GetPathIfExists(mock.Anything).Return(".")
@@ -5448,6 +5461,59 @@ func TestGetRevisionChartDetails(t *testing.T) {
 		assert.Equal(t, "test-description", chartDetails.Description)
 		assert.Equal(t, "test-home", chartDetails.Home)
 		assert.Equal(t, []string{"test-maintainer"}, chartDetails.Maintainers)
+	})
+}
+
+func TestGetOCIMetadata(t *testing.T) {
+	digest := "sha256:9bbd48edfdc7c85bc6a17c9e4153b365dcc17723d73b9b385700b3205a968765"
+	repoURL := "oci://registry.example.com/myorg/mychart"
+	req := &apiclient.RepoServerRevisionChartDetailsRequest{
+		Repo:     &v1alpha1.Repository{Repo: repoURL, Type: "oci"},
+		Name:     "mychart",
+		Revision: digest,
+	}
+
+	t.Run("cache hit returns metadata without invoking oci client", func(t *testing.T) {
+		service, _, _ := newServiceWithOpt(t, func(_ *gitmocks.Client, _ *helmmocks.Client, ociClient *ocimocks.Client, _ *iomocks.TempPaths) {
+			// No DigestMetadata expectation: if it is called, the mock's
+			// AssertExpectations (via t.Cleanup) will fail the test.
+			_ = ociClient
+		}, t.TempDir())
+
+		cached := &v1alpha1.OCIMetadata{Version: "1.2.3", Authors: "cached@example.com"}
+		require.NoError(t, service.cache.SetOCIMetadata(repoURL, digest, cached))
+
+		got, err := service.GetOCIMetadata(t.Context(), req)
+		require.NoError(t, err)
+		assert.Equal(t, cached, got)
+	})
+
+	t.Run("cache miss fetches from remote and populates cache", func(t *testing.T) {
+		service, _, _ := newServiceWithOpt(t, func(_ *gitmocks.Client, _ *helmmocks.Client, ociClient *ocimocks.Client, _ *iomocks.TempPaths) {
+			ociClient.EXPECT().DigestMetadata(mock.Anything, digest).Return(&imagev1.Manifest{
+				Annotations: map[string]string{
+					"org.opencontainers.image.version":     "2.0.0",
+					"org.opencontainers.image.authors":     "remote@example.com",
+					"org.opencontainers.image.description": "from remote",
+				},
+			}, nil).Once()
+		}, t.TempDir())
+
+		got, err := service.GetOCIMetadata(t.Context(), req)
+		require.NoError(t, err)
+		assert.Equal(t, "2.0.0", got.Version)
+		assert.Equal(t, "remote@example.com", got.Authors)
+		assert.Equal(t, "from remote", got.Description)
+
+		cached, err := service.cache.GetOCIMetadata(repoURL, digest)
+		require.NoError(t, err)
+		assert.Equal(t, got, cached)
+
+		// A second call must be served from cache — .Once() on the mock above
+		// would fail if DigestMetadata were invoked again.
+		got2, err := service.GetOCIMetadata(t.Context(), req)
+		require.NoError(t, err)
+		assert.Equal(t, got, got2)
 	})
 }
 

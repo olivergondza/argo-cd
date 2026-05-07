@@ -136,20 +136,30 @@ func verify(g *v1alpha1.SourceIntegrityGitPolicyGPG, gitClient git.Client, verif
 		return nil, "", fmt.Errorf("unknown GPG mode %q configured for GIT source integrity", g.Mode)
 	}
 
-	signatures, err := gitClient.LsSignatures(verifiedRevision, deep)
+	// TODO: Remove deprecated https://github.com/argoproj/argo-cd/issues/27695
+	signatures, legacyVerification, err := gitClient.LsSignatures(verifiedRevision, deep)
 	if err != nil {
 		return nil, "", err
 	}
-
-	if len(signatures) == 0 {
-		panic("no signatures found for " + verifiedRevision)
+	legacyDescriptionCondition := VerifyGnuPGSignature(verifiedRevision, g.Keys, legacyVerification)
+	legacyDescription := ""
+	if legacyDescriptionCondition != nil {
+		legacyDescription = legacyDescriptionCondition.Message
 	}
 
-	problems, legacyDescription := describeProblems(g, signatures)
+	if len(signatures) == 0 {
+		// Checked for defensiveness, there should be 1+ signatures always
+		return nil, "", errors.New("git LsSignatures found no signatures for " + verifiedRevision)
+	}
+
+	problems, legacyGood := describeProblems(g, signatures)
 	result := &v1alpha1.SourceIntegrityCheckResult{Checks: []v1alpha1.SourceIntegrityCheckResultItem{{
 		Name:     checkName,
 		Problems: problems,
 	}}}
+	if legacyDescription == "" {
+		legacyDescription = legacyGood
+	}
 	return result, legacyDescription, nil
 }
 
@@ -158,7 +168,7 @@ func verify(g *v1alpha1.SourceIntegrityGitPolicyGPG, gitClient git.Client, verif
 func describeProblems(g *v1alpha1.SourceIntegrityGitPolicyGPG, signatureInfos []git.RevisionSignatureInfo) (problems []string, legacyDescription string) {
 	reportedKeys := make(map[string]any)
 	for _, signatureInfo := range signatureInfos {
-		// TODO: Delete with next major version. Backward compatibility only
+		// TODO: Remove deprecated https://github.com/argoproj/argo-cd/issues/27695
 		if legacyDescription == "" {
 			if signatureInfo.VerificationResult == git.GPGVerificationResultUnsigned {
 				legacyDescription = "Revision is not signed."

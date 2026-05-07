@@ -891,6 +891,7 @@ func verifyGenerateManifests(
 			ApiVersions:                     apiVersions,
 			HelmOptions:                     helmOptions,
 			SourceIntegrity:                 proj.EffectiveSourceIntegrity(),
+			VerifySignature:                 proj.EffectiveSourceIntegrity() != nil, // nolint:staticcheck
 			HelmRepoCreds:                   helmRepoCreds,
 			TrackingMethod:                  trackingMethod,
 			EnabledSourceTypes:              enableGenerateManifests,
@@ -1189,6 +1190,8 @@ func mergeVirtualProject(proj *argoappv1.AppProject, globalProj *argoappv1.AppPr
 	proj.Spec.SourceRepos = append(proj.Spec.SourceRepos, globalProj.Spec.SourceRepos...)
 
 	proj.Spec.Destinations = append(proj.Spec.Destinations, globalProj.Spec.Destinations...)
+
+	proj.Spec.DestinationServiceAccounts = append(proj.Spec.DestinationServiceAccounts, globalProj.Spec.DestinationServiceAccounts...)
 
 	return proj
 }

@@ -145,7 +145,7 @@ type Client interface {
 	// If revision is an annotated tag or a semantic constraint matching an annotated tag, its signature is reported as well
 	// If deep==true, list the commits backwards in history until a signed "seal commit" or repo init commit. The listing includes those seal commits.
 	// If deep==false, examines the revision only. Checking the annotated tag signature if the revision is an annotated tag, commit signature otherwise.
-	LsSignatures(revision string, deep bool) ([]RevisionSignatureInfo, error)
+	LsSignatures(revision string, deep bool) ([]RevisionSignatureInfo, string, error)
 	ChangedFiles(revision string, targetRevision string) ([]string, error)
 	IsRevisionPresent(revision string) bool
 	// SetAuthor sets the author name and email in the git configuration.
@@ -1015,50 +1015,50 @@ const (
 	GPGVerificationResultUnsigned         GPGVerificationResult = "unsigned"                       // Commit it not signed at all
 )
 
-func gpgVerificationFromGpgCode(gpgCode string) GPGVerificationResult {
+func gpgVerificationFromGpgCode(gpgCode string) (GPGVerificationResult, error) {
 	// GPG code presented by `git verify-tag --raw`
 	// https://github.com/gpg/gnupg/blob/master/doc/DETAILS#general-status-codes
 	switch gpgCode {
 	case "GOODSIG":
-		return GPGVerificationResultGood
+		return GPGVerificationResultGood, nil
 	case "BADSIG":
-		return GPGVerificationResultBad
+		return GPGVerificationResultBad, nil
 	case "EXPSIG":
-		return GPGVerificationResultExpiredSignature
+		return GPGVerificationResultExpiredSignature, nil
 	case "EXPKEYSIG":
-		return GPGVerificationResultExpiredKey
+		return GPGVerificationResultExpiredKey, nil
 	case "REVKEYSIG":
-		return GPGVerificationResultRevokedKey
+		return GPGVerificationResultRevokedKey, nil
 	case "ERRSIG":
-		return GPGVerificationResultMissingKey
+		return GPGVerificationResultMissingKey, nil
 	default:
-		panic(fmt.Sprintf("Unable to parse VerificationResult from '%s'", gpgCode))
+		return "", fmt.Errorf("unable to parse VerificationResult from '%s'", gpgCode)
 	}
 }
 
-func gpgVerificationFromGitRevParse(oneLetter string) GPGVerificationResult {
+func gpgVerificationFromGitRevParse(oneLetter string) (GPGVerificationResult, error) {
 	// The letters each represent a given verification result, as output by git rev-parse pretty format.
 	// See PRETTY FORMAT in git-rev-list(1) for more information.
 	// https://github.com/git/git/blob/5e6e4854e086ba0025bc7dc11e6b475c92a2f556/gpg-interface.c#L188
 	switch oneLetter {
 	case "G":
-		return GPGVerificationResultGood
+		return GPGVerificationResultGood, nil
 	case "B":
-		return GPGVerificationResultBad
+		return GPGVerificationResultBad, nil
 	case "U":
-		return GPGVerificationResultUntrusted
+		return GPGVerificationResultUntrusted, nil
 	case "X":
-		return GPGVerificationResultExpiredSignature
+		return GPGVerificationResultExpiredSignature, nil
 	case "Y":
-		return GPGVerificationResultExpiredKey
+		return GPGVerificationResultExpiredKey, nil
 	case "R":
-		return GPGVerificationResultRevokedKey
+		return GPGVerificationResultRevokedKey, nil
 	case "E":
-		return GPGVerificationResultMissingKey
+		return GPGVerificationResultMissingKey, nil
 	case "N":
-		return GPGVerificationResultUnsigned
+		return GPGVerificationResultUnsigned, nil
 	default:
-		panic(fmt.Sprintf("Unable to parse VerificationResult from '%s'", oneLetter))
+		return "", fmt.Errorf("unable to parse VerificationResult from '%s'", oneLetter)
 	}
 }
 
@@ -1118,7 +1118,11 @@ func evaluateGpgSignStatus(cmdErr error, tagGpgOut string) (result GPGVerificati
 		case 0:
 			continue
 		case 1:
-			return gpgVerificationFromGpgCode(match[0][1]), match[0][2], nil
+			result, err := gpgVerificationFromGpgCode(match[0][1])
+			if err != nil {
+				return "", "", err
+			}
+			return result, match[0][2], nil
 		default:
 			return "", "", fmt.Errorf("too many matches parsing line %q", line)
 		}
@@ -1127,36 +1131,43 @@ func evaluateGpgSignStatus(cmdErr error, tagGpgOut string) (result GPGVerificati
 	return "", "", fmt.Errorf("unexpected `git verify-tag --raw` output: %q", tagGpgOut)
 }
 
-func (m *nativeGitClient) LsSignatures(unresolvedRevision string, deep bool) ([]RevisionSignatureInfo, error) {
+func (m *nativeGitClient) LsSignatures(unresolvedRevision string, deep bool) ([]RevisionSignatureInfo, string, error) {
+	legacyVerification := ""
+
 	// Resolve eventual semantic tag constraint before annotated tag detection
 	if versions.IsConstraint(unresolvedRevision) {
 		refs, err := m.getRefs()
 		if err != nil {
-			return nil, err
+			return nil, "", err
 		}
 		unresolvedRevision, err = versions.MaxVersion(unresolvedRevision, getGitTags(refs))
 		if err != nil {
-			return nil, err
+			return nil, "", err
 		}
+	}
+
+	legacyVerification, err := m.VerifyCommitSignature(unresolvedRevision)
+	if err != nil {
+		return nil, "", err
 	}
 
 	var signatures []RevisionSignatureInfo
 	if m.IsAnnotatedTag(unresolvedRevision) {
 		signature, err := m.tagSignature(unresolvedRevision)
 		if err != nil {
-			return nil, err
+			return nil, "", err
 		}
 		signatures = append(signatures, *signature)
 
 		// Check just the annotated tag
 		if !deep {
-			return signatures, nil
+			return signatures, legacyVerification, nil
 		}
 	}
 
 	commitSignaturesRawOut, err := m.listRawSignatures(deep)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 
 	// Final LF will be cut by executil
@@ -1168,22 +1179,26 @@ func (m *nativeGitClient) LsSignatures(unresolvedRevision string, deep bool) ([]
 			break
 		}
 		if err != nil {
-			return nil, err
+			return nil, "", err
 		}
 
 		if len(r) < 5 {
-			return nil, fmt.Errorf("invalid rev-list output for %q (fields=%d)", unresolvedRevision, len(r))
+			return nil, "", fmt.Errorf("invalid rev-list output for %q (fields=%d)", unresolvedRevision, len(r))
 		}
 
 		revision := r[0]
-		signatureInfo, err := newRevisionSignatureInfo(revision, gpgVerificationFromGitRevParse(r[1]), r[2], r[3], r[4])
+		result, err := gpgVerificationFromGitRevParse(r[1])
 		if err != nil {
-			return nil, fmt.Errorf("failed building revision gpg signature info for %q at %q: %s", unresolvedRevision, revision, err.Error())
+			return nil, "", err
+		}
+		signatureInfo, err := newRevisionSignatureInfo(revision, result, r[2], r[3], r[4])
+		if err != nil {
+			return nil, "", fmt.Errorf("failed building revision gpg signature info for %q at %q: %s", unresolvedRevision, revision, err.Error())
 		}
 		signatures = append(signatures, *signatureInfo)
 	}
 
-	return signatures, nil
+	return signatures, legacyVerification, nil
 }
 
 // newRevisionSignatureInfo builds valid RevisionSignatureInfo
